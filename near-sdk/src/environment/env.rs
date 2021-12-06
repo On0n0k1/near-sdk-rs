@@ -279,6 +279,37 @@ pub fn keccak512_hash(value: &[u8]) -> [u8; 64] {
     }
 }
 
+/// Recovers an ECDSA signer address from a 32-byte message `hash` and a corresponding `signature`
+/// along with `v` recovery byte.
+///
+/// Takes in an additional flag to check for malleability of the signature
+/// which is generally only ideal for transactions.
+///
+/// Returns 64 bytes representing the public key if the recovery was successful.
+pub fn ecrecover(
+    hash: &[u8; 32],
+    signature: &[u8; 64],
+    v: u8,
+    malleability_flag: bool,
+) -> Option<[u8; 64]> {
+    unsafe {
+        let return_code = sys::ecrecover(
+            hash.len() as _,
+            hash.as_ptr() as _,
+            signature.len() as _,
+            signature.as_ptr() as _,
+            v as u64,
+            malleability_flag as u64,
+            ATOMIC_OP_REGISTER,
+        );
+        if return_code == 0 {
+            None
+        } else {
+            Some(read_register_fixed_64(ATOMIC_OP_REGISTER))
+        }
+    }
+}
+
 // ################
 // # Promises API #
 // ################
@@ -680,6 +711,12 @@ pub fn is_valid_account_id(account_id: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::test_env;
+    use hex::FromHex;
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::from_slice;
+    use std::fmt::Display;
 
     #[test]
     fn test_is_valid_account_id_strings() {
@@ -787,5 +824,41 @@ mod tests {
             .unwrap()
             .as_slice()
         );
+    }
+
+    #[derive(Deserialize)]
+    struct EcrecoverTest {
+        #[serde(with = "hex::serde")]
+        m: [u8; 32],
+        v: u8,
+        #[serde(with = "hex::serde")]
+        sig: [u8; 64],
+        mc: bool,
+        #[serde(deserialize_with = "deserialize_option_hex")]
+        res: Option<[u8; 64]>,
+    }
+
+    fn deserialize_option_hex<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: FromHex,
+        <T as FromHex>::Error: Display,
+    {
+        Deserialize::deserialize(deserializer)
+            .map(|v: Option<&str>| v.map(FromHex::from_hex).transpose().map_err(Error::custom))
+            .and_then(|v| v)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_ecrecover() {
+        test_env::setup_free();
+        for EcrecoverTest { m, v, sig, mc, res } in from_slice::<'_, Vec<_>>(
+            std::fs::read("tests/ecrecover-tests.json").unwrap().as_slice(),
+        )
+        .unwrap()
+        {
+            assert_eq!(super::ecrecover(&m, &sig, v, mc), res);
+        }
     }
 }
